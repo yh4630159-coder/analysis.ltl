@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
-import altair as alt # 引入高级绘图库
+import altair as alt
 
 # ================= 1. 配置与映射 =================
 COLUMN_MAPS = {
@@ -33,6 +33,8 @@ COLUMN_MAPS = {
 
 AGE_BINS = [0, 30, 60, 90, 120, 180, 360, 99999]
 AGE_LABELS = ['0-30天', '31-60天', '61-90天', '91-120天', '120-180天', '180-360天', '360天+']
+# 建立库龄的数字索引，用于比较"恶化" (0=0-30天, 6=360天+)
+AGE_MAP = {label: i for i, label in enumerate(AGE_LABELS)}
 
 # ================= 2. 核心处理逻辑 =================
 
@@ -52,7 +54,7 @@ def parse_filename(filename):
         return dept, provider_code, date_str
     return None, None, None
 
-def load_data_v3_2(file):
+def load_data_v1_1(file):
     # 1. 解析文件名
     dept, provider_code, date_str = parse_filename(file.name)
     
@@ -129,8 +131,8 @@ def load_data_v3_2(file):
         return pd.DataFrame()
 
 # ================= 3. 界面逻辑 =================
-st.set_page_config(page_title="海外仓库存 BI V3.2", page_icon="📊", layout="wide")
-st.title("📊 海外仓库存结构对比看板 (V3.2)")
+st.set_page_config(page_title="海外仓库存 BI V1.1", page_icon="📈", layout="wide")
+st.title("📈 海外仓库存分析看板 V1.1 (管理增强版)")
 
 with st.expander("ℹ️ 文件命名规范", expanded=False):
     st.markdown("请将文件重命名为：**`部门_服务商_日期.xlsx`** (例如: `业务一部_AI_2024-01.xlsx`)")
@@ -143,7 +145,7 @@ with st.sidebar:
     dfs = []
     if uploaded_files:
         for file in uploaded_files:
-            df = load_data_v3_2(file)
+            df = load_data_v1_1(file)
             if not df.empty:
                 dfs.append(df)
         st.success(f"已加载 {len(dfs)} 个文件")
@@ -153,9 +155,9 @@ if not dfs:
 else:
     full_df = pd.concat(dfs, ignore_index=True)
     
-    tab1, tab2 = st.tabs(["📊 单月详情 (SKU级)", "🆚 历史对比 (结构级)"])
+    tab1, tab2 = st.tabs(["📊 单月详情 (SKU级)", "🆚 历史趋势 & 风险洞察"])
     
-    # ================= TAB 1: 详情分析 (保持 V2.7 逻辑) =================
+    # ================= TAB 1: 详情分析 =================
     with tab1:
         c1, c2, c3 = st.columns(3)
         with c1: sel_dept = st.selectbox("选择部门", full_df['Dept'].unique(), key='t1_d')
@@ -201,9 +203,9 @@ else:
             else: st.info("无数据")
         else: st.warning("无数据")
 
-    # ================= TAB 2: 趋势对比 (V3.2 核心更新) =================
+    # ================= TAB 2: 趋势对比 & 管理洞察 =================
     with tab2:
-        st.markdown("#### 🆚 库存结构与费用趋势对比")
+        st.markdown("#### 🆚 历史趋势 & 风险洞察")
         
         cc1, cc2, cc3 = st.columns(3)
         with cc1: t_dept = st.selectbox("分析部门", full_df['Dept'].unique(), key='t2_d')
@@ -211,75 +213,126 @@ else:
         
         t_base = full_df[(full_df['Dept']==t_dept)&(full_df['Provider']==t_prov)]
         
-        # 仓库筛选
         t_wh_list = sorted(t_base['Warehouse'].astype(str).unique().tolist())
         t_wh_list.insert(0, "全部汇总")
         with cc3: t_wh = st.selectbox("分析仓库", t_wh_list, key='t2_w')
         
         t_final = t_base if t_wh == "全部汇总" else t_base[t_base['Warehouse']==t_wh]
         
-        # 日期筛选 (让用户决定对比哪几个月)
         available_dates = sorted(t_final['Date'].unique())
-        selected_dates = st.multiselect("选择要对比的月份 (建议选2-3个)", available_dates, default=available_dates)
+        selected_dates = st.multiselect("选择分析月份 (建议选2-3个)", available_dates, default=available_dates)
         
         if not selected_dates:
-            st.warning("请至少选择一个月份进行分析。")
+            st.warning("请选择月份。")
         else:
-            # 过滤数据
+            # 数据准备
             chart_df = t_final[t_final['Date'].isin(selected_dates)]
             
-            # 聚合数据：按日期+库龄段
+            # --- 模块 A: 核心 KPI 仪表盘 (新增：节省计算 & 单位成本) ---
+            st.divider()
+            latest_month = sorted(selected_dates)[-1]
+            latest_data = t_final[t_final['Date'] == latest_month]
+            
+            # 1. 计算呆滞节省金额
+            dead_fee = latest_data[latest_data['Age_Range'] == '360天+']['Fee'].sum()
+            
+            # 2. 计算单位仓租成本 (CPU)
+            total_fee = latest_data['Fee'].sum()
+            total_qty = latest_data['Qty'].sum()
+            cpu = total_fee / total_qty if total_qty > 0 else 0
+            
+            kp1, kp2, kp3 = st.columns(3)
+            kp1.metric(f"{latest_month} 总仓租", f"${total_fee:,.0f}")
+            kp2.metric(f"📉 单位仓租成本 (CPU)", f"${cpu:.3f} /件")
+            kp3.metric(f"💰 清理360天+潜在节省", f"${dead_fee:,.0f}", help="如果现在清理掉所有360天+的库存，下个月能省下的仓租")
+            
+            st.divider()
+
+            # --- 模块 B: 图表分析 ---
             agg_df = chart_df.groupby(['Date', 'Age_Range']).agg({
                 'Qty': 'sum', 'Fee': 'sum', 'Vol': 'sum'
             }).reset_index()
             
-            # --- 1. 库存量对比 (簇状柱形图) ---
-            st.markdown("##### 📦 各库龄段库存量对比 (Quantity Comparison)")
-            st.caption("👈 左侧是不同库龄段。不同颜色的柱子代表不同月份，方便对比同一库龄段下的库存变化。")
-            
-            # 使用 Altair 构建簇状柱形图
+            # 1. 库存结构对比 (簇状柱形图)
+            st.markdown("##### 📦 各库龄段库存量对比 (Quantity Structure)")
             base_chart = alt.Chart(agg_df).encode(
                 x=alt.X('Age_Range', sort=AGE_LABELS, title="库龄分段"),
-                y=alt.Y('Qty', title="库存数量 (PCS)"),
+                y=alt.Y('Qty', title="库存数量"),
                 color=alt.Color('Date', title="月份"),
-                tooltip=['Date', 'Age_Range', 'Qty', 'Fee']
+                tooltip=['Date', 'Age_Range', 'Qty']
             )
-            
-            # xOffset 实现簇状效果
-            grouped_bar = base_chart.mark_bar().encode(
-                xOffset='Date'
-            ).properties(height=400)
-            
+            grouped_bar = base_chart.mark_bar().encode(xOffset='Date').properties(height=350)
             st.altair_chart(grouped_bar, use_container_width=True)
             
-            st.divider()
-            
-            # --- 2. 费用趋势 (堆叠柱状图) ---
-            c_fee, c_vol = st.columns(2)
-            
+            # 2. 费用趋势 & 单位成本趋势 (新增)
+            c_fee, c_cpu = st.columns(2)
             with c_fee:
-                st.markdown("##### 💰 费用结构趋势 (Fee Trend)")
-                st.caption("不同颜色代表不同库龄段的费用贡献。")
-                # 原生 bar_chart 自动堆叠
-                # 数据透视: Index=Date, Columns=Age_Range, Values=Fee
+                st.markdown("##### 💰 费用结构 (Fee Structure)")
                 fee_pivot = agg_df.pivot(index='Date', columns='Age_Range', values='Fee')
-                # 按照标准库龄顺序排序列
                 sorted_cols = [c for c in AGE_LABELS if c in fee_pivot.columns]
                 st.bar_chart(fee_pivot[sorted_cols])
+            
+            with c_cpu:
+                st.markdown("##### 📉 单位仓租成本趋势 (Cost Per Unit)")
+                # 计算每个月的 CPU
+                cpu_trend = chart_df.groupby('Date').apply(
+                    lambda x: pd.Series({'CPU': x['Fee'].sum() / x['Qty'].sum() if x['Qty'].sum() > 0 else 0})
+                ).reset_index()
                 
-            with c_vol:
-                st.markdown("##### 📦 体积结构趋势 (Volume Trend)")
-                st.caption("不同颜色代表不同库龄段的体积贡献。")
-                vol_pivot = agg_df.pivot(index='Date', columns='Age_Range', values='Vol')
-                sorted_cols = [c for c in AGE_LABELS if c in vol_pivot.columns]
-                st.bar_chart(vol_pivot[sorted_cols])
+                cpu_chart = alt.Chart(cpu_trend).mark_line(point=True).encode(
+                    x='Date',
+                    y=alt.Y('CPU', title='单件成本 ($)'),
+                    tooltip=['Date', alt.Tooltip('CPU', format='.3f')]
+                ).properties(height=300)
+                st.altair_chart(cpu_chart, use_container_width=True)
+
+            # --- 模块 C: 恶化预警雷达 (新增) ---
+            st.divider()
+            st.markdown("#### 🚨 风险预警：库存恶化监控 (The Drifters)")
+            st.caption("这里展示那些 **库龄段变差** 的 SKU。它们正在变老，如果不处理，就会变成死库存。")
+            
+            if len(selected_dates) >= 2:
+                # 默认比较最近的两个月
+                sorted_dates = sorted(selected_dates)
+                curr_month = sorted_dates[-1]
+                prev_month = sorted_dates[-2]
                 
-            # --- 3. 详细数据表 ---
-            st.markdown("##### 📋 详细对比数据")
-            # 展示透视表：行=库龄，列=日期，值=费用/库存
-            display_pivot = agg_df.pivot(index='Age_Range', columns='Date', values=['Qty', 'Fee'])
-            # 排序行
-            display_pivot = display_pivot.reindex(AGE_LABELS)
-            st.dataframe(display_pivot.style.format("{:,.0f}", subset=pd.IndexSlice[:, pd.IndexSlice['Qty', :]])
-                                          .format("${:,.2f}", subset=pd.IndexSlice[:, pd.IndexSlice['Fee', :]]), 
-                         use_container_width=True)
+                c_d1, c_d2 = st.columns([1, 3])
+                with c_d1:
+                    st.info(f"正在对比: \n\n **{prev_month}** (旧) \n 🆚 \n **{curr_month}** (新)")
+                
+                with c_d2:
+                    # 提取数据
+                    df_curr = chart_df[chart_df['Date'] == curr_month][['SKU', 'Warehouse', 'Age_Range', 'Fee']]
+                    df_prev = chart_df[chart_df['Date'] == prev_month][['SKU', 'Warehouse', 'Age_Range']]
+                    
+                    # 合并对比
+                    merged = pd.merge(df_prev, df_curr, on=['SKU', 'Warehouse'], suffixes=('_old', '_new'))
+                    
+                    # 计算库龄等级 (0-6)
+                    merged['idx_old'] = merged['Age_Range_old'].map(AGE_MAP).fillna(-1)
+                    merged['idx_new'] = merged['Age_Range_new'].map(AGE_MAP).fillna(-1)
+                    
+                    # 筛选恶化: 新等级 > 旧等级
+                    worsened = merged[merged['idx_new'] > merged['idx_old']].copy()
+                    
+                    if worsened.empty:
+                        st.success("🎉 太棒了！没有发现 SKU 库龄恶化的情况。")
+                    else:
+                        worsened['Fee'] = worsened['Fee'].astype(float)
+                        # 按当前费用倒序，抓大头
+                        top_worsened = worsened.sort_values('Fee', ascending=False).head(20)
+                        
+                        st.dataframe(
+                            top_worsened[['SKU', 'Warehouse', 'Age_Range_old', 'Age_Range_new', 'Fee']]
+                            .rename(columns={
+                                'Age_Range_old': f'{prev_month} 库龄',
+                                'Age_Range_new': f'{curr_month} 库龄 (恶化)',
+                                'Fee': '当前仓租($)'
+                            })
+                            .style.format({'当前仓租($)': '${:.2f}'})
+                            .background_gradient(subset=['当前仓租($)'], cmap='Reds'),
+                            use_container_width=True
+                        )
+            else:
+                st.info("💡 请至少选择 2 个月份来开启【恶化监控】功能。")
