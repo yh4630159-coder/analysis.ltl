@@ -242,7 +242,7 @@ else:
             cpu = total_fee / total_qty if total_qty > 0 else 0
             
             kp1, kp2, kp3 = st.columns(3)
-            kp1.metric(f"{latest_month} 总仓租", f"${total_fee:,.0f}")
+            kp1.metric(f"{latest_month} 单日仓租", f"${total_fee:,.0f}")
             kp2.metric(f"📉 单位仓租成本 (CPU)", f"${cpu:.3f} /件")
             kp3.metric(f"💰 清理360天+潜在节省", f"${dead_fee:,.0f}", help="如果现在清理掉所有360天+的库存，下个月能省下的仓租")
             
