@@ -1,255 +1,306 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 
-# ================= 1. 配置与映射 =================
+# ================= 1. 配置与映射 (V2.7 基础) =================
 COLUMN_MAPS = {
-    'WP (WesternPost)': {
+    'WP': { # WesternPost 简写匹配文件名
         'SKU': 'SKU', 'Warehouse': '仓库/Warehouse', 
         'Qty': '数量/Quantity', 'Fee': '金额/Amount', 
-        'Age': '库龄/Library of Age', 'Vol': '体积(m³)'
+        'Age': '库龄/Library of Age', 'Vol': '体积(m³)',
+        'Full_Name': 'WesternPost'
     },
-    'LG (乐仓)': {
+    'LG': { # 乐仓
         'SKU': '乐仓货品编码', 'Warehouse': '仓库', 
         'Qty': '数量', 'Fee': '计算金额', 
-        'Age': '库龄', 'Vol': '总体积'
+        'Age': '库龄', 'Vol': '总体积',
+        'Full_Name': 'Lecangs'
     },
-    'AI (AI仓)': {
+    'AI': { # AI仓
         'SKU': 'SKU', 'Warehouse': '仓库', 
         'Qty': '库存', 'Fee': '费用', 
-        'Age': '在库天数', 'Vol': '立方数'
+        'Age': '在库天数', 'Vol': '立方数',
+        'Full_Name': 'AI'
     },
-    'WL (WWL)': {
+    'WL': { # 万邑通
         'SKU': '商品SKU', 'Warehouse': '实际发货仓库', 
         'Qty': '库存总数_QTY', 'Fee': '计费总价', 
-        'Age': '库存库龄_CD', 'Vol': '计费总体积_立方米'
+        'Age': '库存库龄_CD', 'Vol': '计费总体积_立方米',
+        'Full_Name': 'WWL'
     }
 }
 
 AGE_BINS = [0, 30, 60, 90, 120, 180, 360, 99999]
 AGE_LABELS = ['0-30天', '31-60天', '61-90天', '91-120天', '120-180天', '180-360天', '360天+']
 
-# ================= 2. 智能数据处理函数 =================
+# ================= 2. 核心处理逻辑 =================
+
+def parse_filename(filename):
+    """
+    解析文件名，提取：部门、服务商、日期
+    期望格式：部门_服务商_YYYY-MM.xlsx (例如：业务一部_AI_2024-01.xlsx)
+    """
+    # 去掉后缀
+    name_body = filename.rsplit('.', 1)[0]
+    parts = name_body.split('_')
+    
+    if len(parts) >= 3:
+        dept = parts[0]
+        provider_code = parts[1].upper() # 转大写以匹配 key
+        date_str = parts[2]
+        return dept, provider_code, date_str
+    return None, None, None
+
 def find_header_row(df, mapping, max_scan=10):
-    """
-    智能查找表头：扫描前N行，看哪一行包含最多的期望列名
-    """
     best_score = 0
     best_header_row = 0
     expected_cols = set(mapping.values())
+    expected_cols.discard(mapping.get('Full_Name')) # 去掉非列名的key
     
-    # 扫描 DataFrame 的前几行
     for i in range(min(len(df), max_scan)):
-        # 获取这一行的数据作为潜在表头
         row_values = df.iloc[i].astype(str).str.strip().tolist()
-        # 计算匹配度 (有多少列名对上了)
         score = sum(1 for col in row_values if col in expected_cols)
-        
         if score > best_score:
             best_score = score
             best_header_row = i
-            
-    # 如果匹配度太低（比如小于2个），可能不需要跳过，保持默认
-    if best_score < 2:
-        return 0
-    
-    # 返回表头所在的行号（Excel里的行号，pandas读取时需要+1，因为iloc是从0开始的数据行）
+    if best_score < 2: return 0
     return best_header_row + 1
 
-def load_and_clean_data(file, provider):
-    df = None
+def load_data_v3(file):
+    # 1. 解析文件名
+    dept, provider_code, date_str = parse_filename(file.name)
     
-    # --- 阶段一：读取文件 (格式兼容) ---
-    try:
-        df = pd.read_excel(file, engine='openpyxl', header=None) # 先不指定header，全部读进来
-    except:
-        pass
+    # 如果文件名不符合规则，尝试模糊匹配 (为了兼容旧习惯，默认为未知部门)
+    if not dept:
+        dept = "默认部门"
+        # 尝试从文件名猜服务商
+        for code in COLUMN_MAPS.keys():
+            if code in file.name.upper():
+                provider_code = code
+                break
+        date_str = "最新" # 无法解析日期
 
-    if df is None:
-        try:
-            file.seek(0)
-            df = pd.read_csv(file, encoding='utf-8', header=None)
-        except:
-            pass
+    if provider_code not in COLUMN_MAPS:
+        st.toast(f"⚠️ 跳过文件 {file.name}: 无法识别服务商(AI/WL/LG/WP)", icon="⏭️")
+        return pd.DataFrame()
 
+    # 2. 读取内容 (V2.7 的强力读取逻辑)
+    df = None
+    try: df = pd.read_excel(file, engine='openpyxl', header=None) 
+    except: pass
     if df is None:
-        try:
-            file.seek(0)
-            df = pd.read_csv(file, encoding='gb18030', header=None)
-        except:
-            pass
+        try: file.seek(0); df = pd.read_csv(file, encoding='utf-8', header=None)
+        except: pass
+    if df is None:
+        try: file.seek(0); df = pd.read_csv(file, encoding='gb18030', header=None)
+        except: pass
             
     if df is None:
-        st.error(f"❌ 解析失败：{provider} 文件无法读取。")
         return pd.DataFrame()
 
     try:
-        mapping = COLUMN_MAPS[provider]
+        mapping = COLUMN_MAPS[provider_code]
         
-        # --- 阶段二：智能定位表头 (Header Hunter) ---
-        # 很多文件(如WL)表头不在第一行，我们需要找到它
+        # 智能表头
         header_idx = 0
         expected_cols = set(mapping.values())
+        expected_cols.discard(mapping.get('Full_Name'))
         
-        # 扫描前20行寻找包含关键列名的行
         for i in range(min(20, len(df))):
             row_values = df.iloc[i].astype(str).str.strip().tolist()
-            # 简单去BOM
             row_values = [x.replace('\ufeff', '') for x in row_values]
-            
-            # 如果这一行包含至少2个我们要找的列名，就认定它是表头
-            match_count = sum(1 for x in row_values if x in expected_cols)
-            if match_count >= 2:
+            if sum(1 for x in row_values if x in expected_cols) >= 2:
                 header_idx = i
                 break
         
-        # 重建 DataFrame，使用找到的表头行
-        # 将第 i 行设为列名，取 i+1 行及之后的数据
         new_columns = df.iloc[header_idx].astype(str).str.strip().str.replace('\ufeff', '')
         df = df.iloc[header_idx+1:].copy()
         df.columns = new_columns
 
-        # --- 阶段三：标准清洗 ---
-        # 映射重命名
+        # 标准清洗
         valid_map = {k: v for k, v in mapping.items() if v in df.columns}
         rename_dict = {v: k for k, v in valid_map.items()}
         df = df.rename(columns=rename_dict)
         
-        # 补全缺失列
-        required_cols = ['SKU', 'Warehouse', 'Qty', 'Fee', 'Age', 'Vol']
-        for col in required_cols:
-            if col not in df.columns: df[col] = 0 
-                
-        # 转换数值类型
         for col in ['Qty', 'Fee', 'Age', 'Vol']:
+            if col not in df.columns: df[col] = 0
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-        # 库龄分段 (强制纯文本)
+        # 库龄处理
         cut_series = pd.cut(df['Age'], bins=AGE_BINS, labels=AGE_LABELS, right=False)
         df['Age_Range'] = cut_series.astype(str)
         df.loc[df['Age_Range'] == 'nan', 'Age_Range'] = '360天+'
         df['Age_Range'] = df['Age_Range'].str.strip()
 
-        df['Provider'] = provider
+        # 🌟 V3.0 新增维度
+        df['Dept'] = dept
+        df['Provider'] = mapping['Full_Name']
+        df['Date'] = date_str
+        
         return df
         
     except Exception as e:
-        st.error(f"⚠️ {provider} 数据清洗出错: {str(e)}")
         return pd.DataFrame()
 
 # ================= 3. 界面逻辑 =================
-st.set_page_config(page_title="海外仓库存分析 V2.7", page_icon="🏭", layout="wide")
-st.title("🏭 海外仓分仓库存分析 (V2.7)")
-st.caption("✅ 更新：智能表头定位(WL修复) | 渲染安全模式(防闪退)")
+st.set_page_config(page_title="海外仓库存 BI V3.0", page_icon="📈", layout="wide")
+st.title("📈 海外仓多部门趋势分析看板 (V3.0)")
 
+with st.expander("ℹ️ 使用指南 & 命名规范 (必读)", expanded=False):
+    st.markdown("""
+    **要想实现趋势对比，请务必按以下格式重命名文件：**
+    
+    `部门名称_服务商代码_日期.xlsx`
+    
+    * **部门名称**：例如 业务一部、业务二部、Amazon团队
+    * **服务商代码**：必须包含 **AI, WL, LG, WP** 其中之一
+    * **日期**：例如 2024-01, 2024-02
+    
+    **✅ 正确示例：** `业务一部_AI_2024-01.xlsx`
+    """)
+
+# --- 侧边栏：批量上传 ---
 with st.sidebar:
-    st.header("1. 数据上传")
+    st.header("📂 数据中心")
+    uploaded_files = st.file_uploader(
+        "批量上传所有文件 (支持多选)", 
+        type=['xlsx', 'xls', 'csv'], 
+        accept_multiple_files=True
+    )
+    
     dfs = []
-    for provider in COLUMN_MAPS.keys():
-        f = st.file_uploader(f"上传 {provider} 数据", key=provider)
-        if f:
-            df = load_and_clean_data(f, provider)
+    if uploaded_files:
+        progress_bar = st.progress(0)
+        for i, file in enumerate(uploaded_files):
+            df = load_data_v3(file)
             if not df.empty:
                 dfs.append(df)
+            progress_bar.progress((i + 1) / len(uploaded_files))
+        st.success(f"成功读取 {len(dfs)} 个文件")
 
 if not dfs:
-    st.info("👈 请在左侧上传文件")
+    st.info("👈 请在左侧上传带有【部门_服务商_日期】命名的文件，即可开启趋势分析。")
 else:
     full_df = pd.concat(dfs, ignore_index=True)
-    st.divider()
     
-    c1, c2 = st.columns(2)
-    with c1:
-        selected_provider = st.selectbox("① 选择部门", full_df['Provider'].unique())
+    # 选项卡切换
+    tab1, tab2 = st.tabs(["📊 单月/单部门详情 (V2.7视图)", "📈 历史趋势对比 (V3.0视图)"])
     
-    provider_df = full_df[full_df['Provider'] == selected_provider]
-    wh_list = sorted(provider_df['Warehouse'].astype(str).unique().tolist())
-    wh_list.insert(0, "全部 (All Warehouses)")
-    
-    with c2:
-        selected_wh = st.selectbox("② 选择仓库", wh_list)
-    
-    if selected_wh == "全部 (All Warehouses)":
-        target_df = provider_df
-        display_name = "全仓库汇总"
-    else:
-        target_df = provider_df[provider_df['Warehouse'] == selected_wh]
-        display_name = selected_wh
-    
-    # 统计展示
-    total_qty = target_df['Qty'].sum()
-    total_vol = target_df['Vol'].sum()
-    total_fee = target_df['Fee'].sum()
-    
-    # 聚合
-    summary = target_df.groupby('Age_Range').agg({'Qty': 'sum', 'Vol': 'sum', 'Fee': 'sum'}).reset_index()
-    
-    # 排序
-    order_map = {label: i for i, label in enumerate(AGE_LABELS + ['360天+'])}
-    summary['sort_key'] = summary['Age_Range'].map(order_map).fillna(999)
-    summary = summary.sort_values('sort_key').drop('sort_key', axis=1)
-
-    # 占比计算
-    summary['库存占比'] = (summary['Qty'] / total_qty * 100).fillna(0) if total_qty else 0
-    summary['体积占比'] = (summary['Vol'] / total_vol * 100).fillna(0) if total_vol else 0
-    summary['费用占比'] = (summary['Fee'] / total_fee * 100).fillna(0) if total_fee else 0
-    
-    # 汇总表展示
-    display = summary.copy()
-    display['Qty'] = display['Qty'].map('{:,.0f}'.format)
-    display['Vol'] = display['Vol'].map('{:,.2f} m³'.format)
-    display['Fee'] = display['Fee'].map('${:,.2f}'.format)
-    display['库存占比'] = display['库存占比'].map('{:.1f}%'.format)
-    display['体积占比'] = display['体积占比'].map('{:.1f}%'.format)
-    display['费用占比'] = display['费用占比'].map('{:.1f}%'.format)
-    
-    st.markdown(f"### 📊 {selected_provider} - {display_name}")
-    k1, k2, k3 = st.columns(3)
-    k1.metric("总库存", f"{total_qty:,.0f}")
-    k2.metric("总体积", f"{total_vol:,.2f}")
-    k3.metric("总费用", f"${total_fee:,.2f}")
-    
-    st.dataframe(display[['Age_Range', 'Qty', '库存占比', 'Vol', '体积占比', 'Fee', '费用占比']], hide_index=True, use_container_width=True)
-    
-    st.divider()
-    st.markdown("#### B. 异常库存深钻 (Top 20 SKU)")
-    
-    # 动态选项
-    available_ages = [label for label in (AGE_LABELS + ['360天+']) if label in target_df['Age_Range'].unique()]
-    
-    if not available_ages:
-        st.warning("暂无数据。")
-    else:
-        age_rng = st.radio("选择库龄段：", available_ages, horizontal=True, index=len(available_ages)-1)
-        drill = target_df[target_df['Age_Range'] == age_rng]
+    # ================= TAB 1: 详情分析 =================
+    with tab1:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            # 级联选择
+            sel_dept = st.selectbox("选择部门", full_df['Dept'].unique(), key='t1_dept')
+        with c2:
+            # 根据部门筛选日期
+            dept_df = full_df[full_df['Dept'] == sel_dept]
+            sel_date = st.selectbox("选择月份", sorted(dept_df['Date'].unique(), reverse=True), key='t1_date')
+        with c3:
+            # 根据部门和日期筛选服务商
+            date_df = dept_df[dept_df['Date'] == sel_date]
+            sel_prov = st.selectbox("选择服务商", date_df['Provider'].unique(), key='t1_prov')
+            
+        # 最终筛选
+        target_df = date_df[date_df['Provider'] == sel_prov]
         
-        if drill.empty:
-            st.info("无数据。")
+        # 仓库选择
+        wh_list = sorted(target_df['Warehouse'].astype(str).unique().tolist())
+        wh_list.insert(0, "全部 (All Warehouses)")
+        sel_wh = st.selectbox("选择仓库", wh_list, key='t1_wh')
+        
+        if sel_wh != "全部 (All Warehouses)":
+            final_df = target_df[target_df['Warehouse'] == sel_wh]
+            wh_name = sel_wh
         else:
-            try:
+            final_df = target_df
+            wh_name = "全仓汇总"
+            
+        # --- 渲染 V2.7 的图表 ---
+        # (此处复用之前的统计逻辑，精简展示)
+        total_fee = final_df['Fee'].sum()
+        total_vol = final_df['Vol'].sum()
+        
+        k1, k2 = st.columns(2)
+        k1.metric("当月总费用", f"${total_fee:,.2f}")
+        k2.metric("当月总体积", f"{total_vol:,.2f} m³")
+        
+        # 库龄表
+        summary = final_df.groupby('Age_Range').agg({'Fee': 'sum', 'Qty': 'sum', 'Vol': 'sum'}).reset_index()
+        order_map = {label: i for i, label in enumerate(AGE_LABELS + ['360天+'])}
+        summary['sort'] = summary['Age_Range'].map(order_map).fillna(999)
+        summary = summary.sort_values('sort').drop('sort', axis=1)
+        
+        summary['费用占比'] = (summary['Fee'] / total_fee * 100).fillna(0)
+        
+        st.dataframe(
+            summary.style.format({'Fee': '${:.2f}', '费用占比': '{:.1f}%', 'Vol': '{:.2f}'})
+            .background_gradient(subset=['Fee'], cmap='Blues'),
+            use_container_width=True
+        )
+        
+        # Deep Dive
+        with st.expander("🔍 异常库存深钻 (Top 20)", expanded=True):
+            avail_ages = [l for l in (AGE_LABELS + ['360天+']) if l in final_df['Age_Range'].unique()]
+            if avail_ages:
+                rng = st.radio("库龄段", avail_ages, horizontal=True, index=len(avail_ages)-1)
+                drill = final_df[final_df['Age_Range'] == rng]
                 top20 = drill.sort_values(by='Fee', ascending=False).head(20)
-                
-                # 准备展示数据
-                top20_show = top20[['SKU', 'Warehouse', 'Qty', 'Vol', 'Fee', 'Age']].copy()
-                top20_show.columns = ['SKU', '所在仓库', '库存数量', '体积(m³)', '仓租费用($)', '具体库龄(天)']
-                
-                st.write(f"🔍 **{age_rng}** - 费用最高的 Top 20 SKU：")
-                
-                # 🌟 安全渲染模式 (Safe Styling)
-                try:
-                    # 尝试带颜色的漂亮表格
-                    styled_df = top20_show.style.format({
-                        '仓租费用($)': '${:.2f}',
-                        '体积(m³)': '{:.2f}',
-                        '具体库龄(天)': '{:.0f}'
-                    }).background_gradient(subset=['仓租费用($)'], cmap='Reds')
-                    
-                    st.dataframe(styled_df, use_container_width=True)
-                    
-                except Exception as style_err:
-                    # 如果上色失败（比如数据全为0导致渐变计算错误），直接显示黑白表格
-                    # st.warning(f"渲染样式时遇到小问题，已自动切换到兼容模式。") 
-                    st.dataframe(top20_show, use_container_width=True)
-                    
-            except Exception as e:
-                st.error(f"生成列表时出错: {e}")
+                st.dataframe(top20[['SKU','Warehouse','Qty','Fee','Age']], use_container_width=True)
+
+    # ================= TAB 2: 趋势分析 (核心新功能) =================
+    with tab2:
+        st.markdown("#### 📈 部门库存/费用走势图")
+        
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            # 趋势筛选
+            t_dept = st.selectbox("分析部门", full_df['Dept'].unique(), key='t2_dept')
+        with cc2:
+            t_data = full_df[full_df['Dept'] == t_dept]
+            t_prov = st.selectbox("分析服务商", t_data['Provider'].unique(), key='t2_prov')
+            
+        t_final = t_data[t_data['Provider'] == t_prov]
+        
+        # 仓库细分
+        t_wh_list = sorted(t_final['Warehouse'].astype(str).unique().tolist())
+        t_wh_list.insert(0, "全部汇总")
+        t_wh = st.selectbox("分析仓库 (可选)", t_wh_list, key='t2_wh')
+        
+        if t_wh != "全部汇总":
+            trend_source = t_final[t_final['Warehouse'] == t_wh]
+        else:
+            trend_source = t_final
+            
+        if len(trend_source['Date'].unique()) < 2:
+            st.warning("⚠️ 当前筛选的数据只有一个月份，无法展示趋势。请上传更多月份的文件。")
+        else:
+            # 数据聚合：按日期分组
+            trend_agg = trend_source.groupby('Date').agg({
+                'Fee': 'sum',
+                'Vol': 'sum',
+                'Qty': 'sum'
+            }).reset_index().sort_values('Date')
+            
+            # 1. 费用 & 体积 双轴趋势图
+            st.markdown("##### 💰 费用(Bar) 与 体积(Line) 变化")
+            
+            # 使用简单的 Streamlit 图表 (也可换成 Altair 更高级)
+            chart_data = trend_agg.set_index('Date')[['Fee', 'Vol']]
+            st.bar_chart(chart_data['Fee'], color='#FF4B4B') # 红色柱状表示费用
+            st.line_chart(chart_data['Vol'], color='#0000FF') # 蓝色线表示体积
+            
+            # 2. 呆滞库存 (360天+) 趋势
+            st.markdown("##### ⚠️ 360天+ 极度呆滞库存趋势")
+            dead_stock = trend_source[trend_source['Age_Range'] == '360天+']
+            if dead_stock.empty:
+                st.success("该时间段内无 360天+ 呆滞库存！")
+            else:
+                dead_trend = dead_stock.groupby('Date')['Fee'].sum().reset_index().sort_values('Date')
+                st.area_chart(dead_trend.set_index('Date'), color='#808080')
+            
+            # 3. 数据透视表
+            st.markdown("##### 📋 详细数据对比")
+            pivot = trend_agg.set_index('Date').T
+            st.dataframe(pivot.style.format("{:,.2f}"), use_container_width=True)
