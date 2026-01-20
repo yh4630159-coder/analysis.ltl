@@ -33,7 +33,6 @@ COLUMN_MAPS = {
 
 AGE_BINS = [0, 30, 60, 90, 120, 180, 360, 99999]
 AGE_LABELS = ['0-30天', '31-60天', '61-90天', '91-120天', '120-180天', '180-360天', '360天+']
-# 建立库龄的数字索引，用于比较"恶化" (0=0-30天, 6=360天+)
 AGE_MAP = {label: i for i, label in enumerate(AGE_LABELS)}
 
 # ================= 2. 核心处理逻辑 =================
@@ -54,7 +53,7 @@ def parse_filename(filename):
         return dept, provider_code, date_str
     return None, None, None
 
-def load_data_v1_1(file):
+def load_data_v3_3(file):
     # 1. 解析文件名
     dept, provider_code, date_str = parse_filename(file.name)
     
@@ -131,8 +130,8 @@ def load_data_v1_1(file):
         return pd.DataFrame()
 
 # ================= 3. 界面逻辑 =================
-st.set_page_config(page_title="海外仓库存 BI V1.1", page_icon="📈", layout="wide")
-st.title("📈 海外仓库存分析看板 V1.1 (管理增强版)")
+st.set_page_config(page_title="海外仓库存 BI V3.3", page_icon="📈", layout="wide")
+st.title("📈 海外仓库存分析看板 V3.3 (SKU宏观聚合版)")
 
 with st.expander("ℹ️ 文件命名规范", expanded=False):
     st.markdown("请将文件重命名为：**`部门_服务商_日期.xlsx`** (例如: `业务一部_AI_2024-01.xlsx`)")
@@ -145,7 +144,7 @@ with st.sidebar:
     dfs = []
     if uploaded_files:
         for file in uploaded_files:
-            df = load_data_v1_1(file)
+            df = load_data_v3_3(file)
             if not df.empty:
                 dfs.append(df)
         st.success(f"已加载 {len(dfs)} 个文件")
@@ -157,7 +156,7 @@ else:
     
     tab1, tab2 = st.tabs(["📊 单月详情 (SKU级)", "🆚 历史趋势 & 风险洞察"])
     
-    # ================= TAB 1: 详情分析 =================
+    # ================= TAB 1: 详情分析 (升级版) =================
     with tab1:
         c1, c2, c3 = st.columns(3)
         with c1: sel_dept = st.selectbox("选择部门", full_df['Dept'].unique(), key='t1_d')
@@ -176,7 +175,7 @@ else:
         k1, k2, k3 = st.columns(3)
         k1.metric("总库存", f"{final_df['Qty'].sum():,.0f}")
         k2.metric("总体积", f"{final_df['Vol'].sum():,.2f} m³")
-        k3.metric("总费用", f"${final_df['Fee'].sum():,.2f}")
+        k3.metric("单日总费用", f"${final_df['Fee'].sum():,.2f}")
         
         # 库龄表
         summary = final_df.groupby('Age_Range').agg({'Fee':'sum','Qty':'sum','Vol':'sum'}).reset_index()
@@ -187,23 +186,75 @@ else:
         
         st.dataframe(summary.style.format({'Fee':'${:.2f}','费用占比':'{:.1f}%'}), use_container_width=True)
         
-        # Top 20
+        # Top 20 深钻 (V3.3 核心修改)
         st.divider()
         st.markdown("#### 🔍 异常库存深钻")
+        
         valid_ages = [l for l in AGE_LABELS if l in final_df['Age_Range'].unique()]
         if valid_ages:
-            rng = st.radio("选择库龄段", valid_ages, horizontal=True, index=len(valid_ages)-1, key='t1_r')
+            # 布局优化：左边选库龄，右边选聚合模式
+            r_col1, r_col2 = st.columns([3, 1])
+            with r_col1:
+                rng = st.radio("选择库龄段", valid_ages, horizontal=True, index=len(valid_ages)-1, key='t1_r')
+            
+            # 筛选出特定库龄段的数据
             drill = final_df[final_df['Age_Range'] == rng]
-            if not drill.empty:
-                top20 = drill.sort_values('Fee', ascending=False).head(20)[['SKU','Warehouse','Qty','Vol','Fee','Age']]
-                try:
-                    st.dataframe(top20.style.format({'Fee':'${:.2f}'}).background_gradient(subset=['Fee'], cmap='Reds'), use_container_width=True)
-                except:
-                    st.dataframe(top20, use_container_width=True)
-            else: st.info("无数据")
-        else: st.warning("无数据")
+            
+            # 🌟 V3.3 新功能：SKU 宏观聚合
+            show_agg = False
+            if sel_wh == "全部汇总":
+                with r_col2:
+                    st.write("") # 占位对齐
+                    st.write("") 
+                    show_agg = st.checkbox("🔀 合并分仓 (SKU宏观)", help="勾选后，将忽略仓库差异，把同一SKU在不同仓库的数据合并统计。费用叠加，库龄平均。")
+            
+            if drill.empty:
+                st.info("无数据")
+            else:
+                if show_agg:
+                    # --- 聚合模式逻辑 ---
+                    # 1. 按 SKU 分组
+                    agg_sku = drill.groupby('SKU').agg({
+                        'Qty': 'sum',
+                        'Vol': 'sum',
+                        'Fee': 'sum',    # 费用：叠加 (更能反映总财务影响)
+                        'Age': 'mean',   # 库龄：平均
+                        'Warehouse': 'nunique' # 统计分布在几个仓库
+                    }).reset_index()
+                    
+                    # 2. 排序 (按总费用)
+                    top20 = agg_sku.sort_values('Fee', ascending=False).head(20)
+                    
+                    # 3. 格式化列名
+                    top20['Warehouse'] = top20['Warehouse'].apply(lambda x: f"分布在 {x} 个仓")
+                    top20_show = top20[['SKU', 'Warehouse', 'Qty', 'Vol', 'Fee', 'Age']].copy()
+                    top20_show.columns = ['SKU', '分布情况', '总库存', '总体积', '总费用(叠加)', '平均库龄']
+                    
+                    st.success(f"📊 已切换至 **宏观聚合模式**：展示了在整个 {sel_prov} 网络中，该库龄段下总费用最高的 20 个 SKU。")
+                    
+                    st.dataframe(
+                        top20_show.style.format({
+                            '总费用(叠加)': '${:.2f}', 
+                            '平均库龄': '{:.0f}',
+                            '总体积': '{:.2f}'
+                        }).background_gradient(subset=['总费用(叠加)'], cmap='Reds'), 
+                        use_container_width=True
+                    )
+                    
+                else:
+                    # --- 原有模式 (详细分仓) ---
+                    top20 = drill.sort_values('Fee', ascending=False).head(20)[['SKU','Warehouse','Qty','Vol','Fee','Age']]
+                    top20_show = top20.copy()
+                    top20_show.columns = ['SKU','所在仓库','库存','体积','费用','库龄']
+                    
+                    try:
+                        st.dataframe(top20_show.style.format({'费用':'${:.2f}', '体积': '{:.2f}'}).background_gradient(subset=['费用'], cmap='Reds'), use_container_width=True)
+                    except:
+                        st.dataframe(top20_show, use_container_width=True)
+        else:
+            st.warning("无数据")
 
-    # ================= TAB 2: 趋势对比 & 管理洞察 =================
+    # ================= TAB 2: 趋势对比 & 管理洞察 (保持 V1.1) =================
     with tab2:
         st.markdown("#### 🆚 历史趋势 & 风险洞察")
         
@@ -225,18 +276,14 @@ else:
         if not selected_dates:
             st.warning("请选择月份。")
         else:
-            # 数据准备
             chart_df = t_final[t_final['Date'].isin(selected_dates)]
             
-            # --- 模块 A: 核心 KPI 仪表盘 (新增：节省计算 & 单位成本) ---
+            # --- 模块 A: 核心 KPI ---
             st.divider()
             latest_month = sorted(selected_dates)[-1]
             latest_data = t_final[t_final['Date'] == latest_month]
             
-            # 1. 计算呆滞节省金额
             dead_fee = latest_data[latest_data['Age_Range'] == '360天+']['Fee'].sum()
-            
-            # 2. 计算单位仓租成本 (CPU)
             total_fee = latest_data['Fee'].sum()
             total_qty = latest_data['Qty'].sum()
             cpu = total_fee / total_qty if total_qty > 0 else 0
@@ -253,7 +300,6 @@ else:
                 'Qty': 'sum', 'Fee': 'sum', 'Vol': 'sum'
             }).reset_index()
             
-            # 1. 库存结构对比 (簇状柱形图)
             st.markdown("##### 📦 各库龄段库存量对比 (Quantity Structure)")
             base_chart = alt.Chart(agg_df).encode(
                 x=alt.X('Age_Range', sort=AGE_LABELS, title="库龄分段"),
@@ -264,7 +310,6 @@ else:
             grouped_bar = base_chart.mark_bar().encode(xOffset='Date').properties(height=350)
             st.altair_chart(grouped_bar, use_container_width=True)
             
-            # 2. 费用趋势 & 单位成本趋势 (新增)
             c_fee, c_cpu = st.columns(2)
             with c_fee:
                 st.markdown("##### 💰 费用结构 (Fee Structure)")
@@ -274,7 +319,6 @@ else:
             
             with c_cpu:
                 st.markdown("##### 📉 单位仓租成本趋势 (Cost Per Unit)")
-                # 计算每个月的 CPU
                 cpu_trend = chart_df.groupby('Date').apply(
                     lambda x: pd.Series({'CPU': x['Fee'].sum() / x['Qty'].sum() if x['Qty'].sum() > 0 else 0})
                 ).reset_index()
@@ -286,41 +330,31 @@ else:
                 ).properties(height=300)
                 st.altair_chart(cpu_chart, use_container_width=True)
 
-            # --- 模块 C: 恶化预警雷达 (新增) ---
+            # --- 模块 C: 恶化预警 ---
             st.divider()
             st.markdown("#### 🚨 风险预警：库存恶化监控 (The Drifters)")
-            st.caption("这里展示那些 **库龄段变差** 的 SKU。它们正在变老，如果不处理，就会变成死库存。")
-            
             if len(selected_dates) >= 2:
-                # 默认比较最近的两个月
                 sorted_dates = sorted(selected_dates)
                 curr_month = sorted_dates[-1]
                 prev_month = sorted_dates[-2]
                 
                 c_d1, c_d2 = st.columns([1, 3])
-                with c_d1:
-                    st.info(f"正在对比: \n\n **{prev_month}** (旧) \n 🆚 \n **{curr_month}** (新)")
+                with c_d1: st.info(f"正在对比: \n\n **{prev_month}** (旧) \n 🆚 \n **{curr_month}** (新)")
                 
                 with c_d2:
-                    # 提取数据
                     df_curr = chart_df[chart_df['Date'] == curr_month][['SKU', 'Warehouse', 'Age_Range', 'Fee']]
                     df_prev = chart_df[chart_df['Date'] == prev_month][['SKU', 'Warehouse', 'Age_Range']]
                     
-                    # 合并对比
                     merged = pd.merge(df_prev, df_curr, on=['SKU', 'Warehouse'], suffixes=('_old', '_new'))
-                    
-                    # 计算库龄等级 (0-6)
                     merged['idx_old'] = merged['Age_Range_old'].map(AGE_MAP).fillna(-1)
                     merged['idx_new'] = merged['Age_Range_new'].map(AGE_MAP).fillna(-1)
                     
-                    # 筛选恶化: 新等级 > 旧等级
                     worsened = merged[merged['idx_new'] > merged['idx_old']].copy()
                     
                     if worsened.empty:
                         st.success("🎉 太棒了！没有发现 SKU 库龄恶化的情况。")
                     else:
                         worsened['Fee'] = worsened['Fee'].astype(float)
-                        # 按当前费用倒序，抓大头
                         top_worsened = worsened.sort_values('Fee', ascending=False).head(20)
                         
                         st.dataframe(
