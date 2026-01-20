@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import altair as alt
-import gc # 引入垃圾回收模块
+import gc  # 垃圾回收
 
 # ================= 1. 配置与映射 =================
 COLUMN_MAPS = {
@@ -36,7 +36,7 @@ AGE_BINS = [0, 30, 60, 90, 120, 180, 360, 99999]
 AGE_LABELS = ['0-30天', '31-60天', '61-90天', '91-120天', '120-180天', '180-360天', '360天+']
 AGE_MAP = {label: i for i, label in enumerate(AGE_LABELS)}
 
-# ================= 2. 核心处理逻辑 (带缓存优化) =================
+# ================= 2. 核心处理逻辑 (稳定缓存版) =================
 
 def parse_filename(filename):
     name_body = filename.rsplit('.', 1)[0]
@@ -53,19 +53,15 @@ def parse_filename(filename):
         return dept, provider_code, date_str
     return None, None, None
 
-# 🚀 优化点 1: 使用缓存装饰器。TTL=3600秒(1小时)
-# 只要文件没变，Streamlit 就不会重新执行这个函数，而是直接返回结果
+# 🚀 优化核心：使用缓存，但返回标准数据类型
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_single_file(file_content, file_name):
-    """
-    为了配合缓存，我们将文件内容(bytes)作为参数传入，而不是文件对象
-    """
-    # 将 bytes 转换回文件流
     file = io.BytesIO(file_content)
-    file.name = file_name # 补回名字用于解析
+    file.name = file_name
 
     dept, provider_code, date_str = parse_filename(file.name)
     
+    # 模糊匹配逻辑
     if not dept:
         dept = "默认部门"
         for code in COLUMN_MAPS.keys():
@@ -93,14 +89,14 @@ def load_single_file(file_content, file_name):
     try:
         mapping = COLUMN_MAPS[provider_code]
         
-        # 智能表头定位
+        # 智能表头 (加速扫描)
         header_idx = 0
         expected_cols = set(mapping.values())
         expected_cols.discard(mapping.get('Full_Name'))
         
-        # 只扫描前15行，减少计算
         for i in range(min(15, len(df))):
             row_values = df.iloc[i].astype(str).str.strip().tolist()
+            row_values = [x.replace('\ufeff', '') for x in row_values]
             match_count = sum(1 for x in row_values if x in expected_cols)
             if match_count >= 2:
                 header_idx = i
@@ -114,105 +110,85 @@ def load_single_file(file_content, file_name):
         rename_dict = {v: k for k, v in valid_map.items()}
         df = df.rename(columns=rename_dict)
         
-        # 🚀 优化点 2: 仅保留必要列，立刻丢弃垃圾数据
+        # 只保留有用列
         required_cols = ['SKU', 'Warehouse', 'Qty', 'Fee', 'Age', 'Vol']
         cols_to_keep = [c for c in required_cols if c in df.columns]
-        df = df[cols_to_keep] # 只切片保留有用列
+        df = df[cols_to_keep]
 
         for col in required_cols:
             if col not in df.columns: df[col] = 0 
                 
-        # 🚀 优化点 3: 数据类型瘦身 (Downcasting)
-        # float64 -> float32 (内存占用减半)
+        # 🌟 修复点：使用标准 float 类型，不强制压缩 float32，防止画图报错
         for col in ['Qty', 'Fee', 'Age', 'Vol']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float32')
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
         cut_series = pd.cut(df['Age'], bins=AGE_BINS, labels=AGE_LABELS, right=False)
         df['Age_Range'] = cut_series.astype(str)
         df.loc[df['Age_Range'] == 'nan', 'Age_Range'] = '360天+'
         df['Age_Range'] = df['Age_Range'].str.strip()
         
-        # 文本列转 Category (如果重复值多，能极大节省内存)
         df['Dept'] = dept
         df['Provider'] = mapping['Full_Name']
         df['Date'] = date_str
         
-        # 强制垃圾回收
-        gc.collect()
-        
+        gc.collect() # 依然保留垃圾回收
         return df
         
     except Exception as e:
         return pd.DataFrame()
 
 # ================= 3. 界面逻辑 =================
-st.set_page_config(page_title="海外仓库存 BI V4.1", page_icon="⚡", layout="wide")
-st.title("⚡ 海外仓库存分析看板 V4.1")
+st.set_page_config(page_title="海外仓库存 BI V4.2", page_icon="🛡️", layout="wide")
+st.title("🛡️ 海外仓库存分析看板 V4.2 (稳定修正版)")
 
-with st.expander("ℹ️ 性能优化说明", expanded=False):
-    st.markdown("""
-    **针对大量文件对比的优化：**
-    1. **智能缓存**：文件读取后会暂存内存，切换筛选条件时**秒级响应**，无需重新读取。
-    2. **内存瘦身**：自动压缩数据精度，支持 30+ 文件同时分析而不易崩溃。
-    3. **垃圾回收**：每处理完一个文件自动清理内存碎片。
-    """)
+with st.expander("ℹ️ 使用贴士", expanded=False):
+    st.markdown("支持批量上传 20+ 文件。首次解析需等待，后续操作将由缓存加速。")
 
 # --- 侧边栏 ---
 with st.sidebar:
     st.header("📂 数据中心")
-    # 允许上传
     uploaded_files = st.file_uploader("批量上传文件", type=['xlsx', 'xls', 'csv'], accept_multiple_files=True)
     
-    # 添加一个清除缓存按钮，防止内存溢出无法重置
-    if st.button("🧹 清除所有缓存 (释放内存)"):
+    if st.button("🧹 刷新缓存"):
         st.cache_data.clear()
-        st.success("缓存已清除！")
+        st.success("已刷新")
 
     dfs = []
     if uploaded_files:
-        # 显示进度条
-        progress_text = "正在全力解析中，请稍候..."
+        progress_text = "正在解析文件，请稍候..."
         my_bar = st.progress(0, text=progress_text)
         
         for i, file in enumerate(uploaded_files):
-            # 读取文件 bytes (为了配合缓存，必须传 bytes)
             bytes_data = file.getvalue()
-            # 调用带缓存的函数
             df = load_single_file(bytes_data, file.name)
             
             if not df.empty:
                 dfs.append(df)
             
-            # 更新进度
-            my_bar.progress((i + 1) / len(uploaded_files), text=f"正在解析第 {i+1}/{len(uploaded_files)} 个文件...")
+            my_bar.progress((i + 1) / len(uploaded_files), text=f"进度: {i+1}/{len(uploaded_files)}")
             
-        my_bar.empty() # 清除进度条
-        st.success(f"✅ 已加载 {len(dfs)} 个文件")
+        my_bar.empty()
+        st.success(f"✅ 成功加载 {len(dfs)} 个文件")
 
 if not dfs:
-    st.info("👈 请上传数据文件以开始分析")
+    st.info("👈 请上传数据文件")
 else:
-    # 合并主表
     full_df = pd.concat(dfs, ignore_index=True)
     
-    # 🚀 优化点 4: 合并后再次转换类型，压缩内存
-    full_df['Dept'] = full_df['Dept'].astype('category')
-    full_df['Provider'] = full_df['Provider'].astype('category')
-    full_df['Warehouse'] = full_df['Warehouse'].astype('category')
-    full_df['Date'] = full_df['Date'].astype('category')
-    full_df['Age_Range'] = full_df['Age_Range'].astype('category')
+    # 转 Category 依然保留，这是安全的内存优化
+    for col in ['Dept', 'Provider', 'Warehouse', 'Date', 'Age_Range']:
+        full_df[col] = full_df[col].astype('category')
 
     tab1, tab2 = st.tabs(["📊 全景详情 (SKU级)", "🆚 历史趋势 & 风险洞察"])
     
     # ================= TAB 1: 全景详情 =================
     with tab1:
-        # 筛选逻辑 (保持 V4.0)
+        # 筛选逻辑
         all_depts = sorted(full_df['Dept'].unique().tolist())
         all_depts.insert(0, "全部汇总")
         
         c1, c2, c3, c4 = st.columns(4)
         with c1: sel_dept = st.selectbox("① 选择部门", all_depts, key='t1_d')
-        
         df_l1 = full_df if sel_dept == "全部汇总" else full_df[full_df['Dept'] == sel_dept]
 
         avail_dates = sorted(df_l1['Date'].unique(), reverse=True)
@@ -235,8 +211,9 @@ else:
         k1, k2, k3 = st.columns(3)
         k1.metric("总库存", f"{final_df['Qty'].sum():,.0f}")
         k2.metric("总体积", f"{final_df['Vol'].sum():,.2f} m³")
-        k3.metric("单日总费用", f"${final_df['Fee'].sum():,.2f}")
+        k3.metric("总费用", f"${final_df['Fee'].sum():,.2f}")
         
+        # 聚合时需处理 category
         summary = final_df.groupby('Age_Range', observed=True).agg({'Fee':'sum','Qty':'sum','Vol':'sum'}).reset_index()
         order_map = {l: i for i, l in enumerate(AGE_LABELS)}
         summary['sort'] = summary['Age_Range'].map(order_map).fillna(999)
@@ -270,7 +247,7 @@ else:
             else:
                 if show_agg:
                     try:
-                        # 转换回 float64 以防止聚合精度丢失，虽然 float32 一般够用
+                        # 确保是标准数字类型
                         for col in ['Qty', 'Vol', 'Fee', 'Age']:
                             drill[col] = pd.to_numeric(drill[col], errors='coerce').fillna(0)
                         
@@ -294,7 +271,7 @@ else:
                         
                         st.dataframe(top20_show.style.format({'总费用(叠加)': '${:.2f}', '平均库龄': '{:.0f}', '总体积': '{:.2f}'}).background_gradient(subset=['总费用(叠加)'], cmap='Reds'), use_container_width=True)
                     except Exception as e:
-                        st.error(f"聚合计算出错: {str(e)}")
+                        st.error(f"聚合出错: {str(e)}")
                 else:
                     cols_show = ['SKU', 'Warehouse', 'Qty', 'Vol', 'Fee', 'Age']
                     if sel_dept == "全部汇总": cols_show.insert(1, 'Dept')
@@ -340,12 +317,12 @@ else:
             cpu = total_fee / total_qty if total_qty > 0 else 0
             
             kp1, kp2, kp3 = st.columns(3)
-            kp1.metric(f"{latest_month} 单日总仓租", f"${total_fee:,.0f}")
+            kp1.metric(f"{latest_month} 总仓租", f"${total_fee:,.0f}")
             kp2.metric(f"📉 单位仓租成本", f"${cpu:.3f} /件")
             kp3.metric(f"💰 360天+潜在节省", f"${dead_fee:,.0f}")
             
             st.divider()
-            # 聚合时需加上 observed=True 以处理 category 类型
+            # 聚合
             agg_df = chart_df.groupby(['Date', 'Age_Range'], observed=True).agg({
                 'Qty': 'sum', 'Fee': 'sum', 'Vol': 'sum'
             }).reset_index()
@@ -387,8 +364,8 @@ else:
                 prev_month = sorted_dates[-2]
                 
                 group_cols = ['SKU', 'Warehouse', 'Dept', 'Provider']
-                # 切片时只取需要的列，减少内存消耗
                 cols_needed = group_cols + ['Age_Range', 'Fee']
+                
                 df_curr = chart_df[chart_df['Date'] == curr_month][cols_needed]
                 df_prev = chart_df[chart_df['Date'] == prev_month][group_cols + ['Age_Range']]
                 
