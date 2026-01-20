@@ -53,7 +53,7 @@ def parse_filename(filename):
         return dept, provider_code, date_str
     return None, None, None
 
-def load_data_v3_4(file):
+def load_data_v4(file):
     dept, provider_code, date_str = parse_filename(file.name)
     
     if not dept:
@@ -126,8 +126,8 @@ def load_data_v3_4(file):
         return pd.DataFrame()
 
 # ================= 3. 界面逻辑 =================
-st.set_page_config(page_title="海外仓库存 BI V3.4", page_icon="📈", layout="wide")
-st.title("📈 海外仓库存分析看板 V3.4 (聚合稳定版)")
+st.set_page_config(page_title="海外仓库存 BI V4.0", page_icon="🌍", layout="wide")
+st.title("🌍 海外仓库存分析看板 V4.0 (上帝视角版)")
 
 with st.expander("ℹ️ 文件命名规范", expanded=False):
     st.markdown("请将文件重命名为：**`部门_服务商_日期.xlsx`** (例如: `业务一部_AI_2024-01.xlsx`)")
@@ -140,7 +140,7 @@ with st.sidebar:
     dfs = []
     if uploaded_files:
         for file in uploaded_files:
-            df = load_data_v3_4(file)
+            df = load_data_v4(file)
             if not df.empty:
                 dfs.append(df)
         st.success(f"已加载 {len(dfs)} 个文件")
@@ -150,30 +150,72 @@ if not dfs:
 else:
     full_df = pd.concat(dfs, ignore_index=True)
     
-    tab1, tab2 = st.tabs(["📊 单月详情 (SKU级)", "🆚 历史趋势 & 风险洞察"])
+    tab1, tab2 = st.tabs(["📊 全景详情 (SKU级)", "🆚 历史趋势 & 风险洞察"])
     
-    # ================= TAB 1: 详情分析 =================
+    # ================= TAB 1: 全景详情 (三级全汇总) =================
     with tab1:
-        c1, c2, c3 = st.columns(3)
-        with c1: sel_dept = st.selectbox("选择部门", full_df['Dept'].unique(), key='t1_d')
-        with c2: sel_date = st.selectbox("选择月份", sorted(full_df[full_df['Dept']==sel_dept]['Date'].unique(), reverse=True), key='t1_dt')
-        with c3: sel_prov = st.selectbox("选择服务商", full_df[(full_df['Dept']==sel_dept)&(full_df['Date']==sel_date)]['Provider'].unique(), key='t1_p')
+        # --- 1. 部门选择 ---
+        # 逻辑：先拿出所有部门，前面加一个“全部汇总”
+        all_depts = sorted(full_df['Dept'].unique().tolist())
+        all_depts.insert(0, "全部汇总")
+        
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: 
+            sel_dept = st.selectbox("① 选择部门", all_depts, key='t1_d')
             
-        target_df = full_df[(full_df['Dept']==sel_dept)&(full_df['Date']==sel_date)&(full_df['Provider']==sel_prov)]
+        # 根据部门筛选数据池 (Level 1 Filter)
+        if sel_dept == "全部汇总":
+            df_l1 = full_df
+        else:
+            df_l1 = full_df[full_df['Dept'] == sel_dept]
+
+        # --- 2. 日期选择 ---
+        # 逻辑：日期一般是单选，为了看特定月份的报表
+        avail_dates = sorted(df_l1['Date'].unique(), reverse=True)
+        with c2: 
+            sel_date = st.selectbox("② 选择月份", avail_dates, key='t1_dt')
+            
+        # 根据日期筛选数据池 (Time Filter)
+        df_l2 = df_l1[df_l1['Date'] == sel_date]
+
+        # --- 3. 服务商选择 ---
+        # 逻辑：基于当前剩下的数据，看有哪些服务商
+        avail_provs = sorted(df_l2['Provider'].unique().tolist())
+        avail_provs.insert(0, "全部汇总")
+        with c3: 
+            sel_prov = st.selectbox("③ 选择服务商", avail_provs, key='t1_p')
+            
+        # 根据服务商筛选数据池 (Level 2 Filter)
+        if sel_prov == "全部汇总":
+            df_l3 = df_l2
+        else:
+            df_l3 = df_l2[df_l2['Provider'] == sel_prov]
+            
+        # --- 4. 仓库选择 ---
+        # 逻辑：基于当前剩下的数据，看有哪些仓库
+        avail_whs = sorted(df_l3['Warehouse'].astype(str).unique().tolist())
+        avail_whs.insert(0, "全部汇总")
+        with c4: 
+            sel_wh = st.selectbox("④ 选择仓库", avail_whs, key='t1_w')
+            
+        # 最终数据 (Final Filter)
+        if sel_wh == "全部汇总":
+            final_df = df_l3
+        else:
+            final_df = df_l3[df_l3['Warehouse'] == sel_wh]
+            
+        # ---------------- 页面展示 ----------------
         
-        wh_list = sorted(target_df['Warehouse'].astype(str).unique().tolist())
-        wh_list.insert(0, "全部汇总")
-        sel_wh = st.selectbox("选择仓库", wh_list, key='t1_w')
-        
-        final_df = target_df if sel_wh == "全部汇总" else target_df[target_df['Warehouse'] == sel_wh]
-        
-        # 统计
+        # 标题动态显示
+        st.markdown(f"### 📋 数据视图：{sel_dept} · {sel_prov} · {sel_wh}")
+
+        # 统计 KPI
         k1, k2, k3 = st.columns(3)
-        k1.metric("总库存", f"{final_df['Qty'].sum():,.0f}")
-        k2.metric("总体积", f"{final_df['Vol'].sum():,.2f} m³")
-        k3.metric("总费用", f"${final_df['Fee'].sum():,.2f}")
+        k1.metric("总库存 (Qty)", f"{final_df['Qty'].sum():,.0f}")
+        k2.metric("总体积 (Vol)", f"{final_df['Vol'].sum():,.2f} m³")
+        k3.metric("总费用 (Fee)", f"${final_df['Fee'].sum():,.2f}")
         
-        # 库龄表
+        # 库龄结构表
         summary = final_df.groupby('Age_Range').agg({'Fee':'sum','Qty':'sum','Vol':'sum'}).reset_index()
         order_map = {l: i for i, l in enumerate(AGE_LABELS)}
         summary['sort'] = summary['Age_Range'].map(order_map).fillna(999)
@@ -192,43 +234,56 @@ else:
             with r_col1:
                 rng = st.radio("选择库龄段", valid_ages, horizontal=True, index=len(valid_ages)-1, key='t1_r')
             
-            drill = final_df[final_df['Age_Range'] == rng].copy() # 🌟 Copy 防止切片警告
+            drill = final_df[final_df['Age_Range'] == rng].copy()
+            
+            # 判断是否开启聚合：只要部门、服务商、仓库任一选了“全部”，就可以开启聚合
+            is_any_all_selected = (sel_dept == "全部汇总") or (sel_prov == "全部汇总") or (sel_wh == "全部汇总")
             
             show_agg = False
-            if sel_wh == "全部汇总":
+            if is_any_all_selected:
                 with r_col2:
                     st.write("")
                     st.write("") 
-                    # 🌟 修复: 增加 unique key
-                    show_agg = st.checkbox("🔀 合并分仓 (SKU宏观)", key="chk_agg_mode")
+                    # 动态文案
+                    help_text = "将同一 SKU 的数据合并显示（费用叠加）。"
+                    show_agg = st.checkbox("🔀 SKU 宏观聚合", value=True, help=help_text, key="chk_agg_mode")
             
             if drill.empty:
                 st.info("无数据")
             else:
                 if show_agg:
                     try:
-                        # 🌟 修复: 强制数据清洗，防止聚合报错
+                        # 强转数字防止报错
                         for col in ['Qty', 'Vol', 'Fee', 'Age']:
                             drill[col] = pd.to_numeric(drill[col], errors='coerce').fillna(0)
                         
-                        # 1. 聚合
+                        # 1. 聚合 (注意：如果选了全部部门，这里会把不同部门的同SKU也加上)
                         agg_sku = drill.groupby('SKU').agg({
                             'Qty': 'sum',
                             'Vol': 'sum',
                             'Fee': 'sum',
                             'Age': 'mean',
-                            'Warehouse': 'nunique'
+                            'Warehouse': 'nunique',
+                            'Dept': 'nunique',     # 统计涉及几个部门
+                            'Provider': 'nunique'  # 统计涉及几个服务商
                         }).reset_index()
                         
-                        # 2. 排序
                         top20 = agg_sku.sort_values('Fee', ascending=False).head(20)
                         
-                        # 3. 格式化
-                        top20['Warehouse'] = top20['Warehouse'].apply(lambda x: f"分布在 {x} 个仓")
-                        top20_show = top20[['SKU', 'Warehouse', 'Qty', 'Vol', 'Fee', 'Age']].copy()
+                        # 构建描述信息
+                        def build_info(row):
+                            infos = []
+                            if sel_dept == "全部汇总" and row['Dept'] > 1: infos.append(f"{row['Dept']}个部门")
+                            if sel_prov == "全部汇总" and row['Provider'] > 1: infos.append(f"{row['Provider']}个服务商")
+                            infos.append(f"{row['Warehouse']}个仓")
+                            return " | ".join(infos)
+
+                        top20['分布'] = top20.apply(build_info, axis=1)
+                        
+                        top20_show = top20[['SKU', '分布', 'Qty', 'Vol', 'Fee', 'Age']].copy()
                         top20_show.columns = ['SKU', '分布情况', '总库存', '总体积', '总费用(叠加)', '平均库龄']
                         
-                        st.success(f"📊 已切换至 **宏观聚合模式**")
+                        st.success(f"📊 宏观视角已开启：正在查看 **{sel_dept}** - **{sel_prov}** 范围内的 SKU 综合表现。")
                         
                         st.dataframe(
                             top20_show.style.format({
@@ -239,35 +294,52 @@ else:
                             use_container_width=True
                         )
                     except Exception as e:
-                        st.error(f"⚠️ 聚合计算时发生错误，已降级显示原数据。原因: {str(e)}")
-                        st.dataframe(drill.head(20), use_container_width=True)
+                        st.error(f"聚合计算出错: {str(e)}")
+                        st.dataframe(drill.head(20))
                 else:
-                    top20 = drill.sort_values('Fee', ascending=False).head(20)[['SKU','Warehouse','Qty','Vol','Fee','Age']]
-                    top20_show = top20.copy()
-                    top20_show.columns = ['SKU','所在仓库','库存','体积','费用','库龄']
+                    # 原始明细模式
+                    cols_show = ['SKU', 'Warehouse', 'Qty', 'Vol', 'Fee', 'Age']
+                    # 如果选了全部部门，最好把部门和服务商也展示出来
+                    if sel_dept == "全部汇总": cols_show.insert(1, 'Dept')
+                    if sel_prov == "全部汇总": cols_show.insert(2, 'Provider')
+                    
+                    top20 = drill.sort_values('Fee', ascending=False).head(20)[cols_show]
                     try:
-                        st.dataframe(top20_show.style.format({'费用':'${:.2f}', '体积': '{:.2f}'}).background_gradient(subset=['费用'], cmap='Reds'), use_container_width=True)
+                        st.dataframe(top20.style.format({'Fee':'${:.2f}', 'Vol': '{:.2f}'}).background_gradient(subset=['Fee'], cmap='Reds'), use_container_width=True)
                     except:
-                        st.dataframe(top20_show, use_container_width=True)
+                        st.dataframe(top20, use_container_width=True)
         else:
             st.warning("无数据")
 
-    # ================= TAB 2: 趋势对比 (保持稳定) =================
+    # ================= TAB 2: 趋势对比 (适配全景逻辑) =================
     with tab2:
         st.markdown("#### 🆚 历史趋势 & 风险洞察")
         
+        # 同样的级联逻辑
         cc1, cc2, cc3 = st.columns(3)
-        with cc1: t_dept = st.selectbox("分析部门", full_df['Dept'].unique(), key='t2_d')
-        with cc2: t_prov = st.selectbox("分析服务商", full_df[full_df['Dept']==t_dept]['Provider'].unique(), key='t2_p')
         
-        t_base = full_df[(full_df['Dept']==t_dept)&(full_df['Provider']==t_prov)]
+        # 1. 部门
+        all_depts_t = sorted(full_df['Dept'].unique().tolist())
+        all_depts_t.insert(0, "全部汇总")
+        with cc1: t_dept = st.selectbox("分析部门", all_depts_t, key='t2_d')
         
-        t_wh_list = sorted(t_base['Warehouse'].astype(str).unique().tolist())
-        t_wh_list.insert(0, "全部汇总")
-        with cc3: t_wh = st.selectbox("分析仓库", t_wh_list, key='t2_w')
+        df_t1 = full_df if t_dept == "全部汇总" else full_df[full_df['Dept'] == t_dept]
+
+        # 2. 服务商
+        all_provs_t = sorted(df_t1['Provider'].unique().tolist())
+        all_provs_t.insert(0, "全部汇总")
+        with cc2: t_prov = st.selectbox("分析服务商", all_provs_t, key='t2_p')
         
-        t_final = t_base if t_wh == "全部汇总" else t_base[t_base['Warehouse']==t_wh]
+        df_t2 = df_t1 if t_prov == "全部汇总" else df_t1[df_t1['Provider'] == t_prov]
+
+        # 3. 仓库
+        all_whs_t = sorted(df_t2['Warehouse'].astype(str).unique().tolist())
+        all_whs_t.insert(0, "全部汇总")
+        with cc3: t_wh = st.selectbox("分析仓库", all_whs_t, key='t2_w')
         
+        t_final = df_t2 if t_wh == "全部汇总" else df_t2[df_t2['Warehouse'] == t_wh]
+        
+        # --- 下面的图表逻辑不需要变，因为 t_final 已经是筛选好的了 ---
         available_dates = sorted(t_final['Date'].unique())
         selected_dates = st.multiselect("选择分析月份", available_dates, default=available_dates)
         
@@ -276,7 +348,7 @@ else:
         else:
             chart_df = t_final[t_final['Date'].isin(selected_dates)]
             
-            # --- KPI ---
+            # KPI
             st.divider()
             latest_month = sorted(selected_dates)[-1]
             latest_data = t_final[t_final['Date'] == latest_month]
@@ -293,7 +365,7 @@ else:
             
             st.divider()
 
-            # --- 图表 ---
+            # 图表
             agg_df = chart_df.groupby(['Date', 'Age_Range']).agg({
                 'Qty': 'sum', 'Fee': 'sum', 'Vol': 'sum'
             }).reset_index()
@@ -328,7 +400,7 @@ else:
                 ).properties(height=300)
                 st.altair_chart(cpu_chart, use_container_width=True)
 
-            # --- 恶化预警 ---
+            # 恶化预警
             st.divider()
             st.markdown("#### 🚨 库存恶化监控")
             if len(selected_dates) >= 2:
@@ -336,10 +408,13 @@ else:
                 curr_month = sorted_dates[-1]
                 prev_month = sorted_dates[-2]
                 
-                df_curr = chart_df[chart_df['Date'] == curr_month][['SKU', 'Warehouse', 'Age_Range', 'Fee']]
-                df_prev = chart_df[chart_df['Date'] == prev_month][['SKU', 'Warehouse', 'Age_Range']]
+                # 聚合时需包含 Dept 和 Provider 防止 SKU 重复
+                group_cols = ['SKU', 'Warehouse', 'Dept', 'Provider']
                 
-                merged = pd.merge(df_prev, df_curr, on=['SKU', 'Warehouse'], suffixes=('_old', '_new'))
+                df_curr = chart_df[chart_df['Date'] == curr_month][group_cols + ['Age_Range', 'Fee']]
+                df_prev = chart_df[chart_df['Date'] == prev_month][group_cols + ['Age_Range']]
+                
+                merged = pd.merge(df_prev, df_curr, on=group_cols, suffixes=('_old', '_new'))
                 merged['idx_old'] = merged['Age_Range_old'].map(AGE_MAP).fillna(-1)
                 merged['idx_new'] = merged['Age_Range_new'].map(AGE_MAP).fillna(-1)
                 
@@ -352,7 +427,7 @@ else:
                     top_worsened = worsened.sort_values('Fee', ascending=False).head(20)
                     
                     st.dataframe(
-                        top_worsened[['SKU', 'Warehouse', 'Age_Range_old', 'Age_Range_new', 'Fee']]
+                        top_worsened[['SKU', 'Dept', 'Warehouse', 'Age_Range_old', 'Age_Range_new', 'Fee']]
                         .rename(columns={'Age_Range_old': f'{prev_month} 库龄', 'Age_Range_new': f'{curr_month} 库龄', 'Fee': '当前仓租($)'})
                         .style.format({'当前仓租($)': '${:.2f}'})
                         .background_gradient(subset=['当前仓租($)'], cmap='Reds'),
